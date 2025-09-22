@@ -120,23 +120,34 @@ def fetch_bsky_posts(bsky_handle: str):
         settings.bluesky_username, settings.bluesky_password.get_secret_value()
     )
 
-    result = client.app.bsky.feed.get_author_feed(
-        params={
-            "actor": bsky_handle,
-            "limit": 100,
-        }
-    )
+    all_posts = []
+    cursor = None
+    limit = 100
 
-    posts_with_links = [
-        (
-            f"https://bsky.app/profile/{post.post.author.handle}/post/{post.post.uri.split('/')[-1]}",
-            post.post.record.text,
-        )
-        for post in result.feed
-        if post.post.record.text and post.reply is None and post.reason is None
-    ]
+    while len(all_posts) < 100:
+        params = {"actor": bsky_handle, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        
+        if len(all_posts) + limit > 100:
+            params["limit"] = 100 - len(all_posts)
 
-    return posts_with_links
+        result = client.app.bsky.feed.get_author_feed(params=params)
+
+        posts_with_links = [
+            (
+                f"https://bsky.app/profile/{post.post.author.handle}/post/{post.post.uri.split('/')[-1]}",
+                post.post.record.text,
+            )
+            for post in result.feed
+            if post.post.record.text and post.reply is None and post.reason is None
+        ]
+        all_posts.extend(posts_with_links)
+        cursor = result.cursor
+        if not cursor:
+            break
+
+    return all_posts
 
 
 def main():
