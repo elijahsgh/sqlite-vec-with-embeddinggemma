@@ -13,6 +13,8 @@ from atproto import Client
 
 from typing import List
 
+from datetime import datetime
+
 
 class Settings(BaseSettings):
     bluesky_username: str
@@ -68,20 +70,20 @@ def check_sqlite_vec_version() -> str | None:
 
 class Item(SQLModel, table=True):
     __tablename__ = "items"
-    id: int | None = Field(primary_key=True, default=None)
-    link: str | None = None
+    id: str = Field(primary_key=True)
+    link: str
+    handle: str
     content: str
+    created_at: datetime
     embedding: bytes | None = None
 
 
-def load_database(posts: List[tuple[str, str]], model: SentenceTransformer):
+def load_database(posts: List[tuple[str, str, str, str, datetime]], model: SentenceTransformer):
     item_list = []
 
-    for i, (link, content) in enumerate(posts):
+    for post_id, link, handle, content, created_at in posts:
         item_list.append(
-            Item(
-                id=i, link=link, content=content, embedding=model.encode_query(content)
-            )
+            Item(id=post_id, link=link, handle=handle, content=content, created_at=created_at, embedding=model.encode_query(content))
         )
 
     with Session(engine) as session:
@@ -95,6 +97,8 @@ def nearest_neighbor_query(query_str: str, model: SentenceTransformer):
 
         subquery = (
             select(
+                Item.handle,
+                Item.created_at,
                 Item.link,
                 Item.content,
                 func.vec_distance_cosine(Item.embedding, query_embedding).label(
@@ -104,15 +108,14 @@ def nearest_neighbor_query(query_str: str, model: SentenceTransformer):
         ).subquery()
 
         statement = (
-            select(subquery.c.link, subquery.c.content, subquery.c.distance)
-            #            .where(subquery.c.distance < 0.5)
-            .order_by(subquery.c.distance)
+            select(subquery.c.handle, subquery.c.link, subquery.c.content, subquery.c.distance, subquery.c.created_at)
+#            .where(subquery.c.distance < 0.5)
+            .order_by(subquery.c.distance, subquery.c.created_at.desc())
             .limit(5)
         )
         result = session.exec(statement).all()
 
-        return [(row[2], row[0], row[1]) for row in result]
-
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
 def fetch_bsky_posts(bsky_handle: str):
     client = Client()
@@ -134,15 +137,18 @@ def fetch_bsky_posts(bsky_handle: str):
 
         result = client.app.bsky.feed.get_author_feed(params=params)
 
-        posts_with_links = [
+        posts = [
             (
+                f"{post.post.author.did}:{post.post.uri.split('/')[-1]}",  # Unique ID
                 f"https://bsky.app/profile/{post.post.author.handle}/post/{post.post.uri.split('/')[-1]}",
+                post.post.author.handle,
                 post.post.record.text,
+                datetime.fromisoformat(post.post.record.created_at.replace("Z", "+00:00")),
             )
             for post in result.feed
             if post.post.record.text and post.reply is None and post.reason is None
         ]
-        all_posts.extend(posts_with_links)
+        all_posts.extend(posts)
         cursor = result.cursor
         if not cursor:
             break
@@ -192,11 +198,10 @@ def main():
         else:
             table = Table(show_header=True)
             table.add_column("Distance")
-            table.add_column("Link")
-            table.add_column("Text")
+            table.add_column("Content")
 
-            for distance, link, text in results:
-                table.add_row(f"{distance:0.5f}", link, text)
+            for handle, link, content, distance, created_at in results:
+                table.add_row(f"{distance:0.5f}", f"{handle}, {created_at.strftime('%Y-%m-%d %H:%M:%S')}, {link}\n{content}")
 
             console.print(table)
 
