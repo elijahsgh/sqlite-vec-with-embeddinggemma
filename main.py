@@ -66,26 +66,23 @@ def check_sqlite_vec_version() -> str | None:
     return sql_vec_version
 
 
-def create_virtual_table():
-    with Session(engine) as session:
-        session.exec(
-            text(
-                "CREATE VIRTUAL TABLE vec_items USING vec0(id INTEGER PRIMARY KEY, embedding float32[768])"
-            )
-        )
-
-
 class Item(SQLModel, table=True):
     __tablename__ = "items"
     id: int | None = Field(primary_key=True, default=None)
+    link: str | None = None
     content: str
     embedding: bytes | None = None
 
-def load_database(content_list: List[str], model: SentenceTransformer):
+
+def load_database(posts: List[tuple[str, str]], model: SentenceTransformer):
     item_list = []
 
-    for i, content in enumerate(content_list):
-        item_list.append(Item(id=i, content=content, embedding=model.encode_query(content)))
+    for i, (link, content) in enumerate(posts):
+        item_list.append(
+            Item(
+                id=i, link=link, content=content, embedding=model.encode_query(content)
+            )
+        )
 
     with Session(engine) as session:
         session.add_all(item_list)
@@ -98,20 +95,23 @@ def nearest_neighbor_query(query_str: str, model: SentenceTransformer):
 
         subquery = (
             select(
+                Item.link,
                 Item.content,
-                func.vec_distance_cosine(Item.embedding, query_embedding).label("distance"),
+                func.vec_distance_cosine(Item.embedding, query_embedding).label(
+                    "distance"
+                ),
             )
         ).subquery()
 
         statement = (
-            select(subquery.c.content, subquery.c.distance)
-#            .where(subquery.c.distance < 0.5)
+            select(subquery.c.link, subquery.c.content, subquery.c.distance)
+            #            .where(subquery.c.distance < 0.5)
             .order_by(subquery.c.distance)
             .limit(5)
         )
         result = session.exec(statement).all()
 
-        return [(row[1], row[0]) for row in result]
+        return [(row[2], row[0], row[1]) for row in result]
 
 
 def fetch_bsky_posts(bsky_handle: str):
@@ -127,10 +127,16 @@ def fetch_bsky_posts(bsky_handle: str):
         }
     )
 
-    texts = [post.post.record.text for post in result.feed if post.post.record.text]
+    posts_with_links = [
+        (
+            f"https://bsky.app/profile/{post.post.author.handle}/post/{post.post.uri.split('/')[-1]}",
+            post.post.record.text,
+        )
+        for post in result.feed
+        if post.post.record.text and post.reply is None and post.reason is None
+    ]
 
-    print(result.cursor)
-    return texts
+    return posts_with_links
 
 
 def main():
@@ -149,9 +155,6 @@ def main():
         sql_vec_version = check_sqlite_vec_version()
         console.log(f"sqlite-vec version: {sql_vec_version}")
 
-        console.log("Create virtual table")
-        create_virtual_table()
-
         console.log("Create all tables")
         SQLModel.metadata.create_all(engine)
 
@@ -165,7 +168,7 @@ def main():
         posts = fetch_bsky_posts(bsky_handle)
 
     with console.status(f"Indexing {len(posts)} posts"):
-        console.log("Indexing posts")
+        console.log(f"Indexing {len(posts)} posts")
         load_database(posts, model)
 
     query = Prompt.ask("query", default="exit")
@@ -178,10 +181,11 @@ def main():
         else:
             table = Table(show_header=True)
             table.add_column("Distance")
+            table.add_column("Link")
             table.add_column("Text")
 
-            for distance, text in results:
-                table.add_row(f"{distance:0.5f}", text)
+            for distance, link, text in results:
+                table.add_row(f"{distance:0.5f}", link, text)
 
             console.print(table)
 
